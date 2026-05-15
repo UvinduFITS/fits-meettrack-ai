@@ -1,0 +1,61 @@
+{
+  "expo": {
+    "name": "FITS MeetTrack AI",
+    "slug": "fits-meettrack-ai",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "light",
+    "splash": {
+      "image": "./assets/splash.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#1A3C6E"
+    },
+    "assetBundlePatterns": [
+      "**/*"
+    ],
+    "ios": {
+      "supportsTablet": false,
+      "bundleIdentifier": "io.fitsexpress.meettrack",
+      "infoPlist": {
+        "NSMicrophoneUsageDescription": "FITS MeetTrack AI needs microphone access to record your meetings.",
+        "NSLocationWhenInUseUsageDescription": "FITS MeetTrack AI needs location access to capture meeting location.",
+        "NSLocationAlwaysAndWhenInUseUsageDescription": "FITS MeetTrack AI needs location access to capture meeting location."
+      }
+    },
+    "android": {
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#1A3C6E"
+      },
+      "package": "io.fitsexpress.meettrack",
+      "permissions": [
+        "android.permission.RECORD_AUDIO",
+        "android.permission.ACCESS_FINE_LOCATION",
+        "android.permission.ACCESS_COARSE_LOCATION",
+        "android.permission.WRITE_EXTERNAL_STORAGE",
+        "android.permission.READ_EXTERNAL_STORAGE"
+      ]
+    },
+    "web": {
+      "favicon": "./assets/favicon.png",
+      "bundler": "metro"
+    },
+    "plugins": [
+      "expo-av",
+      [
+        "expo-location",
+        {
+          "locationAlwaysAndWhenInUsePermission": "Allow FITS MeetTrack AI to use your location."
+        }
+      ],
+      "expo-font",
+      "expo-sharing"
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "your-eas-project-id"
+      }
+    }
+  }
+}
