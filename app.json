@@ -19,6 +19,7 @@
       "bundleIdentifier": "io.fitsexpress.meettrack",
       "infoPlist": {
         "NSMicrophoneUsageDescription": "FITS MeetTrack AI needs microphone access to record your meetings.",
+        "NSSpeechRecognitionUsageDescription": "FITS MeetTrack AI uses speech recognition to transcribe your meeting in real-time.",
         "NSLocationWhenInUseUsageDescription": "FITS MeetTrack AI needs location access to capture meeting location.",
         "NSLocationAlwaysAndWhenInUseUsageDescription": "FITS MeetTrack AI needs location access to capture meeting location."
       }
@@ -43,7 +44,6 @@
       "bundler": "metro"
     },
     "plugins": [
-      "expo-av",
       [
         "expo-location",
         {
@@ -51,7 +51,15 @@
         }
       ],
       "expo-font",
-      "expo-sharing"
+      "expo-sharing",
+      "expo-audio",
+      [
+        "expo-speech-recognition",
+        {
+          "microphonePermission": "FITS MeetTrack AI needs microphone access to transcribe your meetings.",
+          "speechRecognitionPermission": "FITS MeetTrack AI uses speech recognition to generate meeting minutes in real-time."
+        }
+      ]
     ],
     "extra": {
       "eas": {

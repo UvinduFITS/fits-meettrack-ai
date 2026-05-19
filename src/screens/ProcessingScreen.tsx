@@ -12,7 +12,7 @@ import { RootStackParamList, ProcessingStatus } from '../types';
 import { COLORS, FONTS, SPACING, RADIUS } from '../constants/theme';
 import { useMeetingStore } from '../stores/meetingStore';
 import {
-  processMeetingViaEdgeFunction,
+  processMeetingWithTranscript,
   getMeetingById,
   updateMeetingRecord,
 } from '../services/meetingService';
@@ -21,8 +21,7 @@ type Nav = NativeStackNavigationProp<RootStackParamList>;
 type Route = RouteProp<RootStackParamList, 'Processing'>;
 
 const STAGES = [
-  { key: 'uploading', label: 'Uploading recording', icon: '📤' },
-  { key: 'transcribing', label: 'Analysing your meeting', icon: '🎯' },
+  { key: 'transcribing', label: 'Processing speech transcript', icon: '🎙️' },
   { key: 'summarizing', label: 'Generating meeting minutes', icon: '✍️' },
   { key: 'generating_pdf', label: 'Creating PDF document', icon: '📄' },
   { key: 'saving', label: 'Saving your records', icon: '💾' },
@@ -69,7 +68,7 @@ export function ProcessingScreen() {
   const navigation = useNavigation<Nav>();
   const route = useRoute<Route>();
   const { meetingId } = route.params;
-  const audioChunks = useMeetingStore((s) => s.audioChunks);
+  const liveTranscript = useMeetingStore((s) => s.liveTranscript);
   const nextSteps = useMeetingStore((s) => s.nextSteps);
   const setAiResults = useMeetingStore((s) => s.setAiResults);
   const setPdfUrl = useMeetingStore((s) => s.setPdfUrl);
@@ -95,29 +94,25 @@ export function ProcessingScreen() {
 
   const runProcessing = async () => {
     try {
-      setCurrentStage(1); // transcribing
-      animateProgress(0.25);
+      setCurrentStage(0); // processing transcript
+      animateProgress(0.2);
 
-      const chunkPaths = audioChunks
-        .filter((c) => c.storagePath)
-        .map((c) => c.storagePath!);
-
-      await processMeetingViaEdgeFunction(
+      await processMeetingWithTranscript(
         meetingId,
-        chunkPaths,
+        liveTranscript,
         nextSteps,
         (status: ProcessingStatus) => {
           if (status.stage === 'summarizing') {
-            setCurrentStage(2);
-            animateProgress(0.5);
+            setCurrentStage(1);
+            animateProgress(0.45);
           } else if (status.stage === 'generating_pdf') {
-            setCurrentStage(3);
-            animateProgress(0.75);
+            setCurrentStage(2);
+            animateProgress(0.7);
           } else if (status.stage === 'saving') {
-            setCurrentStage(4);
+            setCurrentStage(3);
             animateProgress(0.9);
           } else if (status.stage === 'done') {
-            setCurrentStage(5);
+            setCurrentStage(4);
             animateProgress(1);
           }
         }
@@ -136,6 +131,8 @@ export function ProcessingScreen() {
         if (meeting.pdf_url) setPdfUrl(meeting.pdf_url);
       }
 
+      setCurrentStage(4); // done
+      animateProgress(1);
       setTimeout(() => {
         navigation.replace('MeetingResult', { meetingId });
       }, 1000);
@@ -206,7 +203,7 @@ export function ProcessingScreen() {
         </View>
 
         <Text style={styles.disclaimer}>
-          Your recording will be deleted after processing is complete.
+          Your transcript is being processed. Please keep the app open.
         </Text>
       </View>
     </SafeAreaView>

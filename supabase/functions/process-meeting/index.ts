@@ -64,9 +64,7 @@ async function generateMeetingSummary(
 Your job is to produce high-quality, detailed, and professional meeting minutes from meeting transcripts.
 Always respond with a valid JSON object only — no markdown, no code fences, no explanation outside the JSON.`;
 
-  const hasTranscript = transcript && transcript !== 'No transcript available.';
-
-  const userPrompt = `Analyse the meeting information below and return a single JSON object with exactly these keys:
+  const userPrompt = `Analyse the meeting transcript below and return a single JSON object with exactly these keys:
 
 {
   "summary": "A detailed 4-6 sentence executive summary covering: the purpose of the meeting, the main topics discussed, key outcomes, and what happens next. Write in formal business language. Be specific — mention the client name, the meeting topic, and the confirmed next steps.",
@@ -84,24 +82,22 @@ Always respond with a valid JSON object only — no markdown, no code fences, no
 }
 
 Rules — follow exactly:
-- summary: ALWAYS produce this. Write 4-6 complete sentences. Mention the client (${clientName}), meeting purpose (${meetingTitle}), what was discussed, decisions made, and next steps. Never leave this empty.
-- agenda: List 3-6 main topics. If no transcript, infer logically from the meeting title and next steps.
-- keyDiscussionPoints: Write 4-8 full, specific sentences describing what was discussed. Each point must be a complete sentence with context, not just a label.
-- decisions: Only list confirmed decisions. If none were made, return [].
-- actionItems: Convert every next step into a concrete action item. Always populate this from the next steps provided.
+- summary: Write 4-6 complete sentences based only on what was actually discussed in the transcript. Mention the client (${clientName}), meeting purpose (${meetingTitle}), what was discussed, decisions made, and next steps.
+- agenda: List the main topics that were actually discussed. Only include topics present in the transcript.
+- keyDiscussionPoints: Write full sentences describing what was actually discussed. Each point must be a complete sentence with context.
+- decisions: Only list confirmed decisions from the transcript. If none were made, return [].
+- actionItems: Convert the confirmed next steps into concrete action items.
 - Priority rules: tasks due immediately = High, tasks due this week = Medium, longer-term = Low.
 - Use formal, professional language throughout.
-- Do NOT invent facts not supported by the transcript or next steps.
+- Do NOT invent or assume facts not present in the transcript or next steps.
 
 MEETING DETAILS:
 - Title: ${meetingTitle}
 - Client: ${clientName}
 - Confirmed next steps: ${nextSteps || 'None specified'}
 
-${hasTranscript
-  ? `TRANSCRIPT:\n${transcript.slice(0, 12000)}`
-  : `NOTE: No audio transcript available. Generate all fields based on the meeting title, client name, and next steps above. Make the summary and discussion points professional and relevant to a cargo logistics context.`
-}`;
+TRANSCRIPT:
+${transcript.slice(0, 12000)}`;
 
   const response = await fetch(`${GROQ_API_URL}/chat/completions`, {
     method: 'POST',
@@ -164,6 +160,7 @@ interface MeetingData {
   address: string | null;
   attendees: Array<{ name: string; designation: string; company: string }>;
   prepared_by: string;
+  has_transcript: boolean;
   summary: string;
   agenda: string[];
   key_discussion_points: string[];
@@ -333,10 +330,9 @@ async function generatePDF(data: MeetingData): Promise<Uint8Array> {
     y -= 16;
   };
 
-  // ── Executive Summary (before section 1) ──────────────────────────────────
-  if (data.summary) {
+  // ── Executive Summary / No-transcript notice ──────────────────────────────
+  if (data.has_transcript && data.summary) {
     drawSectionHeader('Executive Summary');
-    // Split summary into sentences and render as bullet points
     const sentences = data.summary
       .replace(/([.!?])\s+/g, '$1\n')
       .split('\n')
@@ -344,6 +340,14 @@ async function generatePDF(data: MeetingData): Promise<Uint8Array> {
       .filter((s: string) => s.length > 0);
     sentences.forEach((sentence: string) => drawBullet(sentence, 8));
     y -= 10;
+  } else if (!data.has_transcript) {
+    drawSectionHeader('Meeting Note');
+    drawBodyText(
+      'This meeting was recorded without audio. Meeting details and next steps are documented below. ' +
+      'To generate a full AI summary, please ensure the microphone is active during recording.',
+      0, 9.5
+    );
+    y -= 14;
   }
 
   // ── 1. Meeting Details ─────────────────────────────────────────────────────
@@ -400,38 +404,40 @@ async function generatePDF(data: MeetingData): Promise<Uint8Array> {
   });
   y -= 8;
 
-  // ── 3. Agenda ─────────────────────────────────────────────────────────────
-  drawSectionHeader('3. Agenda');
-  if (data.agenda.length === 0) {
-    drawBodyText('Agenda was automatically determined from discussion.', 0, 9);
-  } else {
-    data.agenda.forEach((item, i) => drawBullet(item, 12, `${i + 1}.`));
-  }
-  y -= 6;
+  // ── 3–6. AI-generated sections (only when audio was recorded) ────────────
+  if (data.has_transcript) {
+    // ── 3. Agenda ───────────────────────────────────────────────────────────
+    drawSectionHeader('3. Agenda');
+    if (data.agenda.length === 0) {
+      drawBodyText('No agenda topics were identified from the recording.', 0, 9);
+    } else {
+      data.agenda.forEach((item, i) => drawBullet(item, 12, `${i + 1}.`));
+    }
+    y -= 6;
 
-  // ── 4. Key Discussion Points ───────────────────────────────────────────────
-  drawSectionHeader('4. Key Discussion Points');
-  if (data.key_discussion_points.length === 0) {
-    drawBodyText('No key discussion points were recorded.', 0, 9);
-  } else {
-    data.key_discussion_points.forEach((item, i) => drawBullet(item, 12, `${i + 1}.`));
-  }
-  y -= 6;
+    // ── 4. Key Discussion Points ─────────────────────────────────────────────
+    drawSectionHeader('4. Key Discussion Points');
+    if (data.key_discussion_points.length === 0) {
+      drawBodyText('No key discussion points were identified from the recording.', 0, 9);
+    } else {
+      data.key_discussion_points.forEach((item, i) => drawBullet(item, 12, `${i + 1}.`));
+    }
+    y -= 6;
 
-  // ── 5. Decisions Made ─────────────────────────────────────────────────────
-  drawSectionHeader('5. Decisions Made');
-  if (data.decisions.length === 0) {
-    drawBodyText('No specific decisions recorded.', 0, 9);
-  } else {
-    data.decisions.forEach((d) => drawBullet(d));
-  }
-  y -= 6;
+    // ── 5. Decisions Made ───────────────────────────────────────────────────
+    drawSectionHeader('5. Decisions Made');
+    if (data.decisions.length === 0) {
+      drawBodyText('No specific decisions were identified from the recording.', 0, 9);
+    } else {
+      data.decisions.forEach((d) => drawBullet(d));
+    }
+    y -= 6;
 
-  // ── 6. Action Items ───────────────────────────────────────────────────────
-  drawSectionHeader('6. Action Items');
-  if (data.action_items.length === 0) {
-    drawBodyText('No action items identified.', 0, 9);
-  } else {
+    // ── 6. Action Items ─────────────────────────────────────────────────────
+    drawSectionHeader('6. Action Items');
+    if (data.action_items.length === 0) {
+      drawBodyText('No action items were identified from the recording.', 0, 9);
+    } else {
     // Table
     ensureSpace(24);
     page.drawRectangle({ x: MARGIN, y: y - 18, width: CONTENT_W, height: 20, color: LIGHT_BG });
@@ -460,8 +466,9 @@ async function generatePDF(data: MeetingData): Promise<Uint8Array> {
       page.drawText(item.priority, { x: aiColX[3], y: y - 1, size: 8.5, font: boldFont, color: priColor });
       y -= 16;
     });
-  }
-  y -= 8;
+    }
+    y -= 8;
+  } // end has_transcript sections
 
   // ── 7. Next Steps ─────────────────────────────────────────────────────────
   drawSectionHeader('7. Next Steps / Future Follow-up');
@@ -515,7 +522,12 @@ serve(async (req) => {
   const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
 
   try {
-    const { meetingId, chunkStoragePaths, nextSteps } = await req.json();
+    const {
+      meetingId,
+      chunkStoragePaths = [],
+      nextSteps,
+      transcript: sttTranscript,  // text from expo-speech-recognition (STT mode)
+    } = await req.json();
 
     if (!meetingId) {
       return new Response(JSON.stringify({ success: false, error: 'meetingId required' }), {
@@ -535,44 +547,61 @@ serve(async (req) => {
       throw new Error('Meeting not found');
     }
 
-    // ── Step 1: Transcribe all chunks ────────────────────────────────────────
-    const transcripts: string[] = [];
+    // ── Step 1: Obtain transcript ─────────────────────────────────────────────
+    // STT mode: transcript text was produced on-device by expo-speech-recognition.
+    // Whisper mode (legacy): download audio chunks and transcribe via Groq Whisper.
+    let hasRealTranscript: boolean;
+    let fullTranscript: string | null;
     const processedPaths: string[] = [];
 
-    for (let i = 0; i < chunkStoragePaths.length; i++) {
-      const storagePath = chunkStoragePaths[i];
-      try {
-        const { data: audioData, error: dlErr } = await supabase.storage
-          .from('meeting-audio')
-          .download(storagePath);
+    if (sttTranscript?.trim()) {
+      // ── STT mode ────────────────────────────────────────────────────────────
+      fullTranscript = sttTranscript.trim();
+      hasRealTranscript = true;
+      console.log(`[process-meeting] STT mode: meetingId=${meetingId} transcript length=${fullTranscript.length}`);
+    } else {
+      // ── Whisper mode (audio chunks) ──────────────────────────────────────────
+      const transcripts: string[] = [];
 
-        if (dlErr || !audioData) continue;
+      for (let i = 0; i < chunkStoragePaths.length; i++) {
+        const storagePath = chunkStoragePaths[i];
+        try {
+          const { data: audioData, error: dlErr } = await supabase.storage
+            .from('meeting-audio')
+            .download(storagePath);
 
-        const arrayBuffer = await audioData.arrayBuffer();
-        const audioBytes = new Uint8Array(arrayBuffer);
+          if (dlErr || !audioData) continue;
 
-        if (audioBytes.length < 1000) continue; // skip near-empty chunks
+          const arrayBuffer = await audioData.arrayBuffer();
+          const audioBytes = new Uint8Array(arrayBuffer);
 
-        const text = await transcribeChunk(audioBytes, i);
-        if (text.trim()) transcripts.push(text.trim());
-        processedPaths.push(storagePath);
-      } catch (chunkErr) {
-        console.error(`Chunk ${i} error:`, chunkErr);
-        // continue with remaining chunks
+          if (audioBytes.length < 1000) continue;
+
+          const text = await transcribeChunk(audioBytes, i);
+          if (text.trim()) transcripts.push(text.trim());
+          processedPaths.push(storagePath);
+        } catch (chunkErr) {
+          console.error(`Chunk ${i} error:`, chunkErr);
+        }
       }
-    }
 
-    const fullTranscript = transcripts.join('\n\n') || 'No transcript available.';
+      hasRealTranscript = transcripts.length > 0;
+      fullTranscript = hasRealTranscript ? transcripts.join('\n\n') : null;
+      console.log(`[process-meeting] Whisper mode: meetingId=${meetingId} chunks=${chunkStoragePaths.length} transcribed=${transcripts.length}`);
+    }
 
     await supabase.from('meetings').update({ transcript: fullTranscript }).eq('id', meetingId);
 
-    // ── Step 2: AI Summary ────────────────────────────────────────────────────
-    const aiResult = await generateMeetingSummary(
-      fullTranscript,
-      nextSteps ?? '',
-      meeting.meeting_title,
-      meeting.client_name
-    );
+    // ── Step 2: AI Summary (only when real audio was recorded) ────────────────
+    let aiResult: AIResult | null = null;
+    if (hasRealTranscript && fullTranscript) {
+      aiResult = await generateMeetingSummary(
+        fullTranscript,
+        nextSteps ?? '',
+        meeting.meeting_title,
+        meeting.client_name
+      );
+    }
 
     // ── Step 3: Generate PDF ──────────────────────────────────────────────────
     const pdfData: MeetingData = {
@@ -587,11 +616,12 @@ serve(async (req) => {
       address: meeting.address,
       attendees: meeting.attendees ?? [],
       prepared_by: meeting.prepared_by,
-      summary: aiResult.summary,
-      agenda: aiResult.agenda,
-      key_discussion_points: aiResult.keyDiscussionPoints,
-      decisions: aiResult.decisions,
-      action_items: aiResult.actionItems,
+      has_transcript: hasRealTranscript,
+      summary: aiResult?.summary ?? '',
+      agenda: aiResult?.agenda ?? [],
+      key_discussion_points: aiResult?.keyDiscussionPoints ?? [],
+      decisions: aiResult?.decisions ?? [],
+      action_items: aiResult?.actionItems ?? [],
       next_steps: nextSteps ?? null,
     };
 
@@ -605,19 +635,27 @@ serve(async (req) => {
 
     if (pdfUploadErr) throw new Error(`PDF upload failed: ${pdfUploadErr.message}`);
 
-    const { data: pdfUrlData } = supabase.storage.from('meeting-pdfs').getPublicUrl(pdfPath);
-    const pdfUrl = pdfUrlData.publicUrl;
+    // Use a signed URL (service role can create these regardless of bucket visibility).
+    // 1 year expiry is sufficient for practical use.
+    const { data: signedUrlData, error: signedUrlErr } = await supabase.storage
+      .from('meeting-pdfs')
+      .createSignedUrl(pdfPath, 60 * 60 * 24 * 365);
+
+    if (signedUrlErr || !signedUrlData?.signedUrl) {
+      throw new Error(`Could not create PDF download URL: ${signedUrlErr?.message ?? 'unknown'}`);
+    }
+    const pdfUrl = signedUrlData.signedUrl;
 
     // ── Step 5: Update meeting record ─────────────────────────────────────────
     await supabase
       .from('meetings')
       .update({
         transcript: fullTranscript,
-        agenda: aiResult.agenda,
-        summary: aiResult.summary,
-        key_discussion_points: aiResult.keyDiscussionPoints,
-        decisions: aiResult.decisions,
-        action_items: aiResult.actionItems,
+        agenda: aiResult?.agenda ?? null,
+        summary: aiResult?.summary ?? null,
+        key_discussion_points: aiResult?.keyDiscussionPoints ?? null,
+        decisions: aiResult?.decisions ?? null,
+        action_items: aiResult?.actionItems ?? null,
         next_steps: nextSteps ?? null,
         pdf_url: pdfUrl,
         status: 'completed',

@@ -6,13 +6,14 @@ import {
   TouchableOpacity,
   Alert,
   Platform,
+  ScrollView,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useNavigation, useRoute, RouteProp } from '@react-navigation/native';
 import { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import { RootStackParamList } from '../types';
 import { COLORS, FONTS, SPACING, RADIUS, SHADOWS } from '../constants/theme';
-import { useAudioRecording } from '../hooks/useAudioRecording';
+import { useSpeechToText } from '../hooks/useSpeechToText';
 import { useLocation } from '../hooks/useLocation';
 import { useMeetingStore } from '../stores/meetingStore';
 import { createMeetingRecord, updateMeetingRecord } from '../services/meetingService';
@@ -21,165 +22,139 @@ import { formatDuration } from '../utils/format';
 import { nanoid } from '../utils/nanoid';
 import dayjs from 'dayjs';
 
-type Nav = NativeStackNavigationProp<RootStackParamList>;
+type Nav   = NativeStackNavigationProp<RootStackParamList>;
 type Route = RouteProp<RootStackParamList, 'Recording'>;
 
 const IS_WEB = Platform.OS === 'web';
 
-function PulsingDot() {
+function PulsingDot({ active }: { active: boolean }) {
   const [visible, setVisible] = useState(true);
   useEffect(() => {
-    const iv = setInterval(() => setVisible((v) => !v), 800);
+    if (!active) return;
+    const iv = setInterval(() => setVisible((v) => !v), 700);
     return () => clearInterval(iv);
-  }, []);
-  return <View style={[styles.pulseDot, { opacity: visible ? 1 : 0.15 }]} />;
+  }, [active]);
+  return (
+    <View style={[styles.pulseDot, { opacity: active ? (visible ? 1 : 0.2) : 0.2 }]} />
+  );
 }
 
 export function RecordingScreen() {
   const navigation = useNavigation<Nav>();
-  const route = useRoute<Route>();
+  const route      = useRoute<Route>();
   const { setupData } = route.params;
   const { user } = useAuth();
 
-  const setSetupData    = useMeetingStore((s) => s.setSetupData);
-  const setStartTime    = useMeetingStore((s) => s.setStartTime);
-  const setEndTime      = useMeetingStore((s) => s.setEndTime);
-  const setLocation     = useMeetingStore((s) => s.setLocation);
-  const setCurrentMId   = useMeetingStore((s) => s.setCurrentMeetingId);
-  const setElapsed      = useMeetingStore((s) => s.setRecordingElapsed);
-  const setIsRecording  = useMeetingStore((s) => s.setIsRecording);
-  const elapsed         = useMeetingStore((s) => s.recordingElapsedSeconds);
-  const storeLatitude   = useMeetingStore((s) => s.latitude);
-  const storeLongitude  = useMeetingStore((s) => s.longitude);
-  const storeAddress    = useMeetingStore((s) => s.address);
+  const setSetupData      = useMeetingStore((s) => s.setSetupData);
+  const setStartTime      = useMeetingStore((s) => s.setStartTime);
+  const setEndTime        = useMeetingStore((s) => s.setEndTime);
+  const setLocation       = useMeetingStore((s) => s.setLocation);
+  const setCurrentMId     = useMeetingStore((s) => s.setCurrentMeetingId);
+  const setElapsed        = useMeetingStore((s) => s.setRecordingElapsed);
+  const setIsRecording    = useMeetingStore((s) => s.setIsRecording);
+  const setLiveTranscript = useMeetingStore((s) => s.setLiveTranscript);
+  const elapsed           = useMeetingStore((s) => s.recordingElapsedSeconds);
+  const storeLatitude     = useMeetingStore((s) => s.latitude);
+  const storeLongitude    = useMeetingStore((s) => s.longitude);
+  const storeAddress      = useMeetingStore((s) => s.address);
 
-  const { startRecording, stopRecording } = useAudioRecording();
+  const {
+    transcript,
+    partialTranscript,
+    isListening,
+    error: sttError,
+    startListening,
+    stopListening,
+  } = useSpeechToText();
+
   const { requestAndCapture } = useLocation();
 
   const [stopping, setStopping]             = useState(false);
   const [dbError, setDbError]               = useState('');
   const [locationStatus, setLocationStatus] = useState<'capturing' | 'captured' | 'failed'>('capturing');
-  const [audioStatus, setAudioStatus]       = useState<'pending' | 'active' | 'denied'>('pending');
 
-  // Refs so confirmStop always reads fresh values
-  const meetingIdRef      = useRef<string>(nanoid()); // local fallback ID
-  const dbSavedRef        = useRef(false);
-  const webElapsedRef     = useRef(0);
-  const webTimerRef       = useRef<ReturnType<typeof setInterval> | null>(null);
-  const webAudioActiveRef = useRef(false); // true when MediaRecorder is running
-  const latRef            = useRef<number | null>(null);
-  const lngRef            = useRef<number | null>(null);
-  const addrRef           = useRef<string | null>(null);
-  const startTimeRef      = useRef(new Date());
+  const meetingIdRef  = useRef<string>(nanoid());
+  const dbSavedRef    = useRef(false);
+  const elapsedRef    = useRef(0);
+  const elapsedTimer  = useRef<ReturnType<typeof setInterval> | null>(null);
+  const latRef        = useRef<number | null>(null);
+  const lngRef        = useRef<number | null>(null);
+  const addrRef       = useRef<string | null>(null);
+  const startTimeRef  = useRef(new Date());
+  const transcriptScrollRef = useRef<ScrollView>(null);
 
-  // Keep location refs in sync
+  // Keep location refs in sync with store
   useEffect(() => { latRef.current  = storeLatitude;  }, [storeLatitude]);
   useEffect(() => { lngRef.current  = storeLongitude; }, [storeLongitude]);
   useEffect(() => { addrRef.current = storeAddress;   }, [storeAddress]);
+
+  // Auto-scroll transcript to bottom as text grows
+  useEffect(() => {
+    transcriptScrollRef.current?.scrollToEnd({ animated: true });
+  }, [transcript, partialTranscript]);
 
   useEffect(() => {
     setSetupData(setupData);
     startTimeRef.current = new Date();
     setStartTime(startTimeRef.current);
 
-    if (IS_WEB) {
-      startWebMode();
-    } else {
-      startMobileRecording();
-    }
+    // Start elapsed timer
+    elapsedRef.current = 0;
+    elapsedTimer.current = setInterval(() => {
+      elapsedRef.current += 1;
+      setElapsed(elapsedRef.current);
+    }, 1000);
 
-    // Create DB record in background (non-blocking)
+    setIsRecording(true);
+
+    // Start STT (web will show an error message inline)
+    startListening();
+
+    // DB and location run in background (non-blocking)
     createDbRecord();
-
-    // Capture location in background
     captureLocation();
 
-    return () => stopWebTimer();
+    return () => {
+      if (elapsedTimer.current) clearInterval(elapsedTimer.current);
+    };
   }, []);
 
-  // ── Web mode: try audio first, fall back to timer-only ────────
-  const startWebMode = async () => {
-    const audioStarted = await startRecording(); // startRecording now handles web via MediaRecorder
-    if (audioStarted) {
-      webAudioActiveRef.current = true;
-      setAudioStatus('active');
-    } else {
-      // Mic permission denied — run timer-only
-      setAudioStatus('denied');
-      setIsRecording(true);
-      startWebTimer();
-    }
-  };
-
-  // ── Web timer (fallback when mic denied) ───────────────────
-  const startWebTimer = () => {
-    webElapsedRef.current = 0;
-    webTimerRef.current = setInterval(() => {
-      webElapsedRef.current += 1;
-      setElapsed(webElapsedRef.current);
-    }, 1000);
-  };
-
-  const stopWebTimer = () => {
-    if (webTimerRef.current) {
-      clearInterval(webTimerRef.current);
-      webTimerRef.current = null;
-    }
-  };
-
-  // ── Mobile recording ────────────────────────────────────────
-  const startMobileRecording = async () => {
-    const started = await startRecording();
-    if (!started) {
-      Alert.alert(
-        'Microphone Permission Required',
-        'Please allow microphone access to record your meeting.',
-        [{ text: 'OK', onPress: () => navigation.goBack() }]
-      );
-    }
-  };
-
-  // ── Create DB record (best-effort) ──────────────────────────
+  // ── DB record ────────────────────────────────────────────────────────────────
   const createDbRecord = async () => {
     try {
-      const userId = user?.id;
-      if (!userId) return; // not logged in — session will handle navigation
-
-      const record = {
-        meeting_title:          setupData.meetingTitle,
-        client_name:            setupData.clientName,
-        attendees:              setupData.attendees,
-        prepared_by:            setupData.preparedBy,
-        start_time:             startTimeRef.current.toISOString(),
-        end_time:               startTimeRef.current.toISOString(),
-        duration_seconds:       0,
-        meeting_date:           dayjs(startTimeRef.current).format('YYYY-MM-DD'),
-        latitude:               null,
-        longitude:              null,
-        address:                null,
-        transcript:             null,
-        agenda:                 null,
-        summary:                null,
-        key_discussion_points:  null,
-        decisions:              null,
-        action_items:           null,
-        next_steps:             null,
-        pdf_url:                null,
-        status:                 'recording' as const,
-        created_by:             userId,
-      };
-
-      const id = await createMeetingRecord(record);
+      if (!user?.id) return;
+      const id = await createMeetingRecord({
+        meeting_title:         setupData.meetingTitle,
+        client_name:           setupData.clientName,
+        attendees:             setupData.attendees,
+        prepared_by:           setupData.preparedBy,
+        start_time:            startTimeRef.current.toISOString(),
+        end_time:              startTimeRef.current.toISOString(),
+        duration_seconds:      0,
+        meeting_date:          dayjs(startTimeRef.current).format('YYYY-MM-DD'),
+        latitude:              null,
+        longitude:             null,
+        address:               null,
+        transcript:            null,
+        agenda:                null,
+        summary:               null,
+        key_discussion_points: null,
+        decisions:             null,
+        action_items:          null,
+        next_steps:            null,
+        pdf_url:               null,
+        status:                'recording' as const,
+        created_by:            user.id,
+      });
       meetingIdRef.current = id;
       setCurrentMId(id);
       dbSavedRef.current = true;
-      setDbError('');
-    } catch (e: any) {
-      setDbError('⚠️  Could not save to database. Check Supabase setup.');
+    } catch {
+      setDbError('⚠️  Could not save to database. Check your connection.');
     }
   };
 
-  // ── Location ────────────────────────────────────────────────
+  // ── Location ─────────────────────────────────────────────────────────────────
   const captureLocation = async () => {
     setLocationStatus('capturing');
     const loc = await requestAndCapture();
@@ -191,17 +166,20 @@ export function RecordingScreen() {
     }
   };
 
-  // ── Stop ────────────────────────────────────────────────────
+  // ── Stop ──────────────────────────────────────────────────────────────────────
   const handleStop = () => {
     if (IS_WEB) {
-      // eslint-disable-next-line no-alert
       const ok = window.confirm('Stop this meeting and generate minutes?');
       if (ok) doStop();
     } else {
-      Alert.alert('Stop Meeting?', 'This will end the recording and prepare your meeting minutes.', [
-        { text: 'Cancel', style: 'cancel' },
-        { text: 'Stop Meeting', style: 'destructive', onPress: doStop },
-      ]);
+      Alert.alert(
+        'Stop Meeting?',
+        'This will end the recording and prepare your meeting minutes.',
+        [
+          { text: 'Cancel', style: 'cancel' },
+          { text: 'Stop Meeting', style: 'destructive', onPress: doStop },
+        ]
+      );
     }
   };
 
@@ -212,43 +190,37 @@ export function RecordingScreen() {
     const endTime = new Date();
     setEndTime(endTime);
 
-    if (IS_WEB) {
-      const mid = meetingIdRef.current;
-
-      if (webAudioActiveRef.current) {
-        await stopRecording(); // finalises audio blob, stops stream, stops elapsed timer
-      } else {
-        stopWebTimer();
-        setIsRecording(false);
-      }
-
-      const dur = useMeetingStore.getState().durationSeconds || webElapsedRef.current;
-
-      if (dbSavedRef.current) {
-        try {
-          await updateMeetingRecord(mid, {
-            end_time:         endTime.toISOString(),
-            duration_seconds: dur,
-            latitude:         latRef.current,
-            longitude:        lngRef.current,
-            address:          addrRef.current,
-          });
-        } catch { /* continue */ }
-      }
-
-      navigation.replace('NextSteps', { meetingId: mid });
-    } else {
-      try {
-        await stopRecording();
-        navigation.replace('NextSteps', { meetingId: meetingIdRef.current });
-      } catch {
-        setStopping(false);
-        Alert.alert('Error', 'Failed to stop recording. Please try again.');
-      }
+    // Stop elapsed timer
+    if (elapsedTimer.current) {
+      clearInterval(elapsedTimer.current);
+      elapsedTimer.current = null;
     }
-  }, [stopping]);
 
-  // ── Location display text ───────────────────────────────────
+    // Stop STT and snapshot the transcript
+    stopListening();
+    const finalTranscript = transcript.trim();
+    setLiveTranscript(finalTranscript);
+    setIsRecording(false);
+
+    const dur = elapsedRef.current;
+
+    // Update DB record with final duration + location
+    if (dbSavedRef.current) {
+      try {
+        await updateMeetingRecord(meetingIdRef.current, {
+          end_time:         endTime.toISOString(),
+          duration_seconds: dur,
+          latitude:         latRef.current,
+          longitude:        lngRef.current,
+          address:          addrRef.current,
+        });
+      } catch { /* non-blocking — NextStepsScreen will handle */ }
+    }
+
+    navigation.replace('NextSteps', { meetingId: meetingIdRef.current });
+  }, [stopping, transcript, stopListening, setLiveTranscript]);
+
+  // ── Location display ──────────────────────────────────────────────────────────
   const locationText = () => {
     if (locationStatus === 'capturing') return '📍  Capturing location...';
     if (locationStatus === 'captured')
@@ -258,7 +230,7 @@ export function RecordingScreen() {
     return '📍  Location not available';
   };
 
-  const isReady = IS_WEB || true; // on mobile, useAudioRecording controls its own state
+  const hasTranscript = transcript.length > 0 || partialTranscript.length > 0;
 
   return (
     <SafeAreaView style={styles.safe} edges={['top']}>
@@ -267,29 +239,42 @@ export function RecordingScreen() {
         {/* ── Status bar ── */}
         <View style={styles.statusBar}>
           <View style={styles.statusLeft}>
-            {IS_WEB && <PulsingDot />}
+            <PulsingDot active={isListening && !stopping} />
             <Text style={styles.statusText}>
-              {IS_WEB ? (stopping ? 'STOPPING...' : 'WEB PREVIEW') : (stopping ? 'STOPPING...' : 'RECORDING')}
+              {stopping
+                ? 'STOPPING...'
+                : IS_WEB
+                  ? 'WEB PREVIEW'
+                  : isListening
+                    ? 'LISTENING'
+                    : 'STARTING...'}
             </Text>
           </View>
           <Text style={styles.timer}>{formatDuration(elapsed)}</Text>
         </View>
 
-        {/* ── Web notice ── */}
-        {IS_WEB && audioStatus === 'denied' && (
-          <View style={styles.webBanner}>
-            <Text style={styles.webBannerText}>
-              🎙️  Microphone permission denied — meeting will be recorded without audio. Allow mic access and restart for full recording.
+        {/* ── DB error ── */}
+        {!!dbError && (
+          <View style={styles.errorBar}>
+            <Text style={styles.errorBarText}>{dbError}</Text>
+          </View>
+        )}
+
+        {/* ── Web not-supported notice ── */}
+        {IS_WEB && (
+          <View style={styles.warningBar}>
+            <Text style={styles.warningBarText}>
+              🎙️  Speech recognition is not available in the web preview. Use the Android app for live transcription.
             </Text>
           </View>
         )}
 
-        {/* ── DB error ── */}
-        {dbError ? (
-          <View style={styles.errorBar}>
-            <Text style={styles.errorBarText}>{dbError}</Text>
+        {/* ── STT permission / error notice ── */}
+        {!IS_WEB && sttError && !stopping && (
+          <View style={styles.warningBar}>
+            <Text style={styles.warningBarText}>⚠️  {sttError}</Text>
           </View>
-        ) : null}
+        )}
 
         {/* ── Main content ── */}
         <View style={styles.content}>
@@ -297,26 +282,55 @@ export function RecordingScreen() {
           {/* Meeting card */}
           <View style={styles.meetingCard}>
             <Text style={styles.meetingLabel}>MEETING</Text>
-            <Text style={styles.meetingTitle}>{setupData.meetingTitle}</Text>
+            <Text style={styles.meetingTitle} numberOfLines={2}>{setupData.meetingTitle}</Text>
             <Text style={styles.clientName}>{setupData.clientName}</Text>
           </View>
 
-          {/* Mic visual */}
-          <View style={styles.visual}>
-            <View style={[styles.ring3, stopping && styles.dim]}>
-              <View style={[styles.ring2, stopping && styles.dim]}>
-                <View style={[styles.ring1, stopping && styles.dim]}>
-                  <Text style={styles.micEmoji}>🎙️</Text>
-                </View>
-              </View>
+          {/* STT status pill */}
+          {!IS_WEB && (
+            <View style={[styles.sttStatus, isListening && styles.sttStatusActive]}>
+              <Text style={styles.sttStatusEmoji}>{isListening ? '🎙️' : '⏸️'}</Text>
+              <Text style={styles.sttStatusText}>
+                {stopping
+                  ? 'Finalising transcript...'
+                  : isListening
+                    ? 'Listening — speak clearly'
+                    : 'Paused — will resume automatically'}
+              </Text>
             </View>
-            <Text style={styles.visualHint}>
-              {stopping
-                ? 'Finalising...'
-                : IS_WEB
-                ? (audioStatus === 'active' ? '🎙️  Recording audio · Click Stop Meeting when done' : 'Timer running · Click Stop Meeting when done')
-                : 'Place phone on table · Recording in progress'}
-            </Text>
+          )}
+
+          {/* Live transcript box */}
+          <View style={styles.transcriptBox}>
+            <View style={styles.transcriptHeader}>
+              <Text style={styles.transcriptLabel}>LIVE TRANSCRIPT</Text>
+              {hasTranscript && (
+                <Text style={styles.transcriptWordCount}>
+                  {transcript.split(/\s+/).filter(Boolean).length} words
+                </Text>
+              )}
+            </View>
+            <ScrollView
+              ref={transcriptScrollRef}
+              style={styles.transcriptScroll}
+              showsVerticalScrollIndicator={false}
+              keyboardShouldPersistTaps="never"
+            >
+              {!hasTranscript ? (
+                <Text style={styles.transcriptPlaceholder}>
+                  {IS_WEB
+                    ? 'Speech recognition not available in web preview.'
+                    : 'Start speaking — your words will appear here in real-time...'}
+                </Text>
+              ) : (
+                <Text style={styles.transcriptText}>
+                  {transcript}
+                  {partialTranscript ? (
+                    <Text style={styles.partialText}>{transcript ? ' ' : ''}{partialTranscript}</Text>
+                  ) : null}
+                </Text>
+              )}
+            </ScrollView>
           </View>
 
           {/* Location */}
@@ -329,19 +343,9 @@ export function RecordingScreen() {
             </Text>
           </View>
 
-          {/* Attendees */}
-          <View style={styles.infoChip}>
-            <Text style={styles.infoChipLabel}>
-              👥  {setupData.attendees.length} Attendee{setupData.attendees.length !== 1 ? 's' : ''}
-            </Text>
-            <Text style={styles.infoChipText} numberOfLines={1}>
-              {setupData.attendees.map((a) => a.name).filter(Boolean).join(', ')}
-            </Text>
-          </View>
-
         </View>
 
-        {/* ── Stop button ── */}
+        {/* ── Footer ── */}
         <View style={styles.footer}>
           <TouchableOpacity
             style={[styles.stopBtn, stopping && styles.stopBtnDisabled]}
@@ -358,7 +362,11 @@ export function RecordingScreen() {
               </>
             )}
           </TouchableOpacity>
-          <Text style={styles.footerHint}>Tap when the meeting ends to generate minutes</Text>
+          <Text style={styles.footerHint}>
+            {IS_WEB
+              ? 'Tap when the meeting ends'
+              : 'Speak naturally · tap Stop when the meeting ends'}
+          </Text>
         </View>
 
       </View>
@@ -368,7 +376,7 @@ export function RecordingScreen() {
 
 const styles = StyleSheet.create({
   safe:      { flex: 1, backgroundColor: COLORS.primary },
-  container: { flex: 1, flexDirection: 'column' },
+  container: { flex: 1 },
 
   statusBar: {
     flexDirection: 'row',
@@ -393,37 +401,31 @@ const styles = StyleSheet.create({
     color: COLORS.white, letterSpacing: -0.5,
   },
 
-  webBanner: {
-    backgroundColor: 'rgba(232,160,32,0.15)',
-    borderBottomWidth: 1,
-    borderBottomColor: 'rgba(232,160,32,0.3)',
-    paddingHorizontal: SPACING.lg,
-    paddingVertical: SPACING.xs + 2,
-  },
-  webBannerText: {
-    fontSize: FONTS.sizes.sm, color: COLORS.accentLight, textAlign: 'center',
-  },
-
   errorBar: {
     backgroundColor: 'rgba(220,38,38,0.15)',
-    borderBottomWidth: 1,
-    borderBottomColor: 'rgba(220,38,38,0.3)',
-    paddingHorizontal: SPACING.lg,
-    paddingVertical: SPACING.xs + 2,
+    borderBottomWidth: 1, borderBottomColor: 'rgba(220,38,38,0.3)',
+    paddingHorizontal: SPACING.lg, paddingVertical: SPACING.xs + 2,
   },
   errorBarText: { fontSize: FONTS.sizes.sm, color: '#FCA5A5', textAlign: 'center' },
 
+  warningBar: {
+    backgroundColor: 'rgba(232,160,32,0.15)',
+    borderBottomWidth: 1, borderBottomColor: 'rgba(232,160,32,0.3)',
+    paddingHorizontal: SPACING.lg, paddingVertical: SPACING.xs + 2,
+  },
+  warningBarText: {
+    fontSize: FONTS.sizes.sm, color: COLORS.accentLight, textAlign: 'center', lineHeight: 18,
+  },
+
   content: {
     flex: 1,
-    paddingHorizontal: SPACING.lg,
-    paddingVertical: SPACING.lg,
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: SPACING.md,
+    paddingHorizontal: SPACING.md,
+    paddingTop: SPACING.md,
+    paddingBottom: SPACING.sm,
+    gap: SPACING.sm,
   },
 
   meetingCard: {
-    width: '100%',
     backgroundColor: 'rgba(255,255,255,0.1)',
     borderRadius: RADIUS.lg,
     padding: SPACING.md,
@@ -431,44 +433,74 @@ const styles = StyleSheet.create({
   },
   meetingLabel: {
     fontSize: FONTS.sizes.xs, fontWeight: '700',
-    color: 'rgba(255,255,255,0.55)', letterSpacing: 2, marginBottom: 4,
+    color: 'rgba(255,255,255,0.55)', letterSpacing: 2, marginBottom: 2,
   },
-  meetingTitle: { fontSize: FONTS.sizes.lg, fontWeight: '800', color: COLORS.white, textAlign: 'center' },
-  clientName:   { fontSize: FONTS.sizes.base, color: 'rgba(255,255,255,0.7)', marginTop: 2 },
+  meetingTitle: {
+    fontSize: FONTS.sizes.md, fontWeight: '800',
+    color: COLORS.white, textAlign: 'center',
+  },
+  clientName: { fontSize: FONTS.sizes.sm, color: 'rgba(255,255,255,0.7)', marginTop: 2 },
 
-  visual:     { alignItems: 'center', gap: SPACING.sm },
-  ring3: {
-    width: 132, height: 132, borderRadius: 66,
-    backgroundColor: 'rgba(255,255,255,0.07)',
-    alignItems: 'center', justifyContent: 'center',
+  sttStatus: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: SPACING.xs,
+    backgroundColor: 'rgba(255,255,255,0.08)',
+    borderRadius: RADIUS.full,
+    paddingVertical: SPACING.xs + 2,
+    paddingHorizontal: SPACING.md,
+    alignSelf: 'center',
   },
-  ring2: {
-    width: 98, height: 98, borderRadius: 49,
-    backgroundColor: 'rgba(255,255,255,0.11)',
-    alignItems: 'center', justifyContent: 'center',
+  sttStatusActive: { backgroundColor: 'rgba(52,211,153,0.15)' },
+  sttStatusEmoji:  { fontSize: 14 },
+  sttStatusText:   { fontSize: FONTS.sizes.xs, color: 'rgba(255,255,255,0.75)', fontWeight: '600' },
+
+  transcriptBox: {
+    flex: 1,
+    backgroundColor: 'rgba(255,255,255,0.08)',
+    borderRadius: RADIUS.lg,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.15)',
+    overflow: 'hidden',
   },
-  ring1: {
-    width: 68, height: 68, borderRadius: 34,
-    backgroundColor: 'rgba(255,255,255,0.17)',
-    alignItems: 'center', justifyContent: 'center',
+  transcriptHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingHorizontal: SPACING.md,
+    paddingVertical: SPACING.xs + 2,
+    borderBottomWidth: 1,
+    borderBottomColor: 'rgba(255,255,255,0.1)',
   },
-  dim:       { opacity: 0.3 },
-  micEmoji:  { fontSize: 28 },
-  visualHint: {
-    fontSize: FONTS.sizes.sm, color: 'rgba(255,255,255,0.55)',
-    textAlign: 'center', maxWidth: 280,
+  transcriptLabel: {
+    fontSize: FONTS.sizes.xs, fontWeight: '700',
+    color: 'rgba(255,255,255,0.5)', letterSpacing: 1,
+  },
+  transcriptWordCount: {
+    fontSize: FONTS.sizes.xs, color: 'rgba(255,255,255,0.4)',
+  },
+  transcriptScroll: { flex: 1, padding: SPACING.md },
+  transcriptPlaceholder: {
+    fontSize: FONTS.sizes.sm,
+    color: 'rgba(255,255,255,0.3)',
+    fontStyle: 'italic',
+    lineHeight: 22,
+  },
+  transcriptText: {
+    fontSize: FONTS.sizes.sm,
+    color: 'rgba(255,255,255,0.9)',
+    lineHeight: 22,
+  },
+  partialText: {
+    color: 'rgba(255,255,255,0.45)',
+    fontStyle: 'italic',
   },
 
   infoChip: {
-    width: '100%',
     backgroundColor: 'rgba(255,255,255,0.1)',
     borderRadius: RADIUS.md,
-    paddingVertical: SPACING.sm + 2,
+    paddingVertical: SPACING.sm,
     paddingHorizontal: SPACING.md,
-  },
-  infoChipLabel: {
-    fontSize: FONTS.sizes.xs, fontWeight: '600',
-    color: 'rgba(255,255,255,0.55)', marginBottom: 2,
   },
   infoChipText: { fontSize: FONTS.sizes.sm, color: 'rgba(255,255,255,0.85)' },
   textWarn:     { color: 'rgba(255,160,100,0.9)' },
@@ -500,6 +532,6 @@ const styles = StyleSheet.create({
     width: 16, height: 16, borderRadius: 3,
     backgroundColor: COLORS.recordingRed,
   },
-  stopBtnText: { fontSize: FONTS.sizes.md, fontWeight: '800', color: COLORS.recordingRed },
-  footerHint:  { fontSize: FONTS.sizes.xs, color: 'rgba(255,255,255,0.35)', textAlign: 'center' },
+  stopBtnText:  { fontSize: FONTS.sizes.md, fontWeight: '800', color: COLORS.recordingRed },
+  footerHint:   { fontSize: FONTS.sizes.xs, color: 'rgba(255,255,255,0.35)', textAlign: 'center' },
 });

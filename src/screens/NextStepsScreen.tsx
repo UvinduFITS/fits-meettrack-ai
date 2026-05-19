@@ -15,7 +15,7 @@ import { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import { RootStackParamList } from '../types';
 import { COLORS, FONTS, SPACING, RADIUS, SHADOWS } from '../constants/theme';
 import { useMeetingStore } from '../stores/meetingStore';
-import { uploadAudioChunk, updateMeetingRecord, createMeetingRecord, getMeetingById } from '../services/meetingService';
+import { updateMeetingRecord, createMeetingRecord, getMeetingById } from '../services/meetingService';
 import { useAuth } from '../hooks/useAuth';
 import { formatDurationHuman } from '../utils/format';
 import dayjs from 'dayjs';
@@ -90,9 +90,8 @@ export function NextStepsScreen() {
   const address                = useMeetingStore((s) => s.address);
   const latitude               = useMeetingStore((s) => s.latitude);
   const longitude              = useMeetingStore((s) => s.longitude);
-  const audioChunks            = useMeetingStore((s) => s.audioChunks);
+  const liveTranscript         = useMeetingStore((s) => s.liveTranscript);
   const setNextSteps           = useMeetingStore((s) => s.setNextSteps);
-  const setChunkStoragePath    = useMeetingStore((s) => s.setChunkStoragePath);
   const nextSteps              = useMeetingStore((s) => s.nextSteps);
 
   const [inputText,    setInputText]    = useState(nextSteps);
@@ -171,20 +170,13 @@ export function NextStepsScreen() {
         });
       }
     } catch (dbErr: any) {
-      // If DB is completely unreachable, show an error and stop
       setSubmitting(false);
       setError(`Could not save meeting to database: ${dbErr?.message ?? 'Unknown error'}. Please check your connection and try again.`);
       return;
     }
 
-    // Upload audio chunks (web + mobile) and save actual storage path
-    for (const chunk of audioChunks) {
-      try {
-        const path = await uploadAudioChunk(chunk, finalMeetingId);
-        setChunkStoragePath(chunk.index, path);
-      } catch { /* continue */ }
-    }
-
+    // Transcript was captured by STT during recording — no audio upload needed.
+    // ProcessingScreen will send the liveTranscript text directly to the edge function.
     navigation.replace('Processing', { meetingId: finalMeetingId });
   };
 
@@ -293,10 +285,29 @@ export function NextStepsScreen() {
             ))}
           </ScrollView>
 
+          {liveTranscript ? (
+            <View style={[styles.infoBanner, styles.transcriptBanner]}>
+              <Text style={styles.infoIcon}>🎙️</Text>
+              <View style={{ flex: 1 }}>
+                <Text style={[styles.infoText, { fontWeight: '700', marginBottom: 4 }]}>
+                  Transcript captured ({liveTranscript.split(/\s+/).filter(Boolean).length} words)
+                </Text>
+                <Text style={styles.infoText} numberOfLines={3}>{liveTranscript}</Text>
+              </View>
+            </View>
+          ) : (
+            <View style={styles.infoBanner}>
+              <Text style={styles.infoIcon}>ℹ️</Text>
+              <Text style={styles.infoText}>
+                No speech was captured during this meeting. The AI will generate minutes based on the meeting details and next steps you provide.
+              </Text>
+            </View>
+          )}
+
           <View style={styles.infoBanner}>
             <Text style={styles.infoIcon}>✨</Text>
             <Text style={styles.infoText}>
-              Our AI will analyse the meeting, identify key discussion points, decisions, and action items — then generate a professional PDF.
+              Our AI will analyse the transcript, identify key discussion points, decisions, and action items — then generate a professional PDF.
             </Text>
           </View>
 
@@ -371,8 +382,11 @@ const styles = StyleSheet.create({
   chipText: { fontSize: FONTS.sizes.sm, color: COLORS.primary, fontWeight: '600' },
   infoBanner: {
     flexDirection: 'row', backgroundColor: '#EEF4FF', borderRadius: RADIUS.md,
-    padding: SPACING.md, marginBottom: SPACING.lg, borderWidth: 1, borderColor: '#C7D9FF',
+    padding: SPACING.md, marginBottom: SPACING.md, borderWidth: 1, borderColor: '#C7D9FF',
     gap: SPACING.sm, alignItems: 'flex-start',
+  },
+  transcriptBanner: {
+    backgroundColor: '#F0FDF4', borderColor: '#A7F3C3',
   },
   infoIcon: { fontSize: 16, marginTop: 1 },
   infoText: { flex: 1, fontSize: FONTS.sizes.sm, color: COLORS.primary, lineHeight: 20 },

@@ -24,6 +24,9 @@ interface MeetingState {
   // Next steps input
   nextSteps: string;
 
+  // Live STT transcript captured during recording
+  liveTranscript: string;
+
   // AI-generated content
   transcript: string | null;
   agenda: string[] | null;
@@ -48,6 +51,7 @@ interface MeetingState {
   setChunkStoragePath: (index: number, path: string) => void;
   setCurrentMeetingId: (id: string) => void;
   setNextSteps: (text: string) => void;
+  setLiveTranscript: (t: string) => void;
   setTranscript: (t: string) => void;
   setAiResults: (results: {
     agenda: string[];
@@ -74,6 +78,7 @@ const initialState = {
   audioChunks: [] as AudioChunk[],
   currentMeetingId: null,
   nextSteps: '',
+  liveTranscript: '',
   transcript: null,
   agenda: null,
   keyDiscussionPoints: null,
@@ -116,6 +121,7 @@ export const useMeetingStore = create<MeetingState>((set) => ({
     })),
   setCurrentMeetingId: (id) => set({ currentMeetingId: id }),
   setNextSteps: (text) => set({ nextSteps: text }),
+  setLiveTranscript: (t) => set({ liveTranscript: t }),
   setTranscript: (t) => set({ transcript: t }),
   setAiResults: (results) =>
     set({

@@ -1,42 +1,75 @@
 import { useRef, useCallback, useEffect } from 'react';
-import { Audio } from 'expo-av';
+import {
+  useAudioRecorder,
+  setAudioModeAsync,
+  requestRecordingPermissionsAsync,
+  IOSOutputFormat,
+  AudioQuality,
+} from 'expo-audio';
 import * as FileSystem from 'expo-file-system';
 import { Platform } from 'react-native';
 import { useMeetingStore } from '../stores/meetingStore';
 import { AudioChunk } from '../types';
 
-const CHUNK_DURATION_MS = 10 * 60 * 1000; // 10 minutes
+const CHUNK_DURATION_MS = 10 * 60 * 1000;
+
+const RECORDING_OPTIONS = {
+  extension: '.m4a',
+  sampleRate: 16000,
+  numberOfChannels: 1,
+  bitRate: 64000,
+  android: {
+    outputFormat: 'mpeg4' as const,
+    audioEncoder: 'aac' as const,
+  },
+  ios: {
+    outputFormat: IOSOutputFormat.MPEG4AAC,
+    audioQuality: AudioQuality.MEDIUM,
+    linearPCMBitDepth: 16,
+    linearPCMIsBigEndian: false,
+    linearPCMIsFloat: false,
+  },
+  web: {},
+};
 
 export function useAudioRecording() {
-  // Shared
-  const chunkIndexRef    = useRef(0);
-  const elapsedTimerRef  = useRef<ReturnType<typeof setInterval> | null>(null);
-  const elapsedSecondsRef = useRef(0);
-  const isStoppingRef    = useRef(false);
+  const chunkIndexRef          = useRef(0);
+  const elapsedTimerRef        = useRef<ReturnType<typeof setInterval> | null>(null);
+  const elapsedSecondsRef      = useRef(0);
+  const isStoppingRef          = useRef(false);
+  // Track whether the native recorder is actually recording (don't rely on React state).
+  const isNativeRecordingRef   = useRef(false);
+  // Cache the last URI emitted by the recorder (recorder.uri may update async via React state).
+  const lastRecorderUriRef     = useRef<string | null>(null);
 
-  // Mobile (expo-av)
-  const recordingRef   = useRef<Audio.Recording | null>(null);
-  const chunkTimerRef  = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Mobile (expo-audio)
+  const recorder      = useAudioRecorder(RECORDING_OPTIONS);
+  const chunkTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Web (MediaRecorder)
-  const webRecorderRef    = useRef<MediaRecorder | null>(null);
-  const webStreamRef      = useRef<MediaStream | null>(null);
-  const webChunkDataRef   = useRef<Blob[]>([]);
-  const webChunkTimerRef  = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const webRecorderRef   = useRef<MediaRecorder | null>(null);
+  const webStreamRef     = useRef<MediaStream | null>(null);
+  const webChunkDataRef  = useRef<Blob[]>([]);
+  const webChunkTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const addAudioChunk      = useMeetingStore((s) => s.addAudioChunk);
+  const addAudioChunk       = useMeetingStore((s) => s.addAudioChunk);
   const setRecordingElapsed = useMeetingStore((s) => s.setRecordingElapsed);
-  const setIsRecording     = useMeetingStore((s) => s.setIsRecording);
+  const setIsRecording      = useMeetingStore((s) => s.setIsRecording);
+
+  // Keep lastRecorderUriRef in sync whenever recorder.uri updates via React state.
+  useEffect(() => {
+    if (recorder.uri) lastRecorderUriRef.current = recorder.uri;
+  }, [recorder.uri]);
 
   // ── Web helpers ──────────────────────────────────────────────────────────────
 
   const finalizeWebChunk = useCallback((): Promise<void> => {
     return new Promise((resolve) => {
-      const recorder = webRecorderRef.current;
-      if (!recorder || recorder.state === 'inactive') { resolve(); return; }
+      const rec = webRecorderRef.current;
+      if (!rec || rec.state === 'inactive') { resolve(); return; }
 
-      recorder.addEventListener('stop', () => {
-        const blob = new Blob(webChunkDataRef.current, { type: recorder.mimeType || 'audio/webm' });
+      rec.addEventListener('stop', () => {
+        const blob = new Blob(webChunkDataRef.current, { type: rec.mimeType || 'audio/webm' });
         if (blob.size > 1000) {
           addAudioChunk({
             index: chunkIndexRef.current,
@@ -52,18 +85,18 @@ export function useAudioRecording() {
         resolve();
       }, { once: true });
 
-      recorder.stop();
+      rec.stop();
     });
   }, [addAudioChunk]);
 
   const startWebChunk = useCallback(async () => {
     if (isStoppingRef.current || !webStreamRef.current) return;
 
-    const recorder = new MediaRecorder(webStreamRef.current);
+    const rec = new MediaRecorder(webStreamRef.current);
     webChunkDataRef.current = [];
-    recorder.ondataavailable = (e) => { if (e.data.size > 0) webChunkDataRef.current.push(e.data); };
-    recorder.start(1000);
-    webRecorderRef.current = recorder;
+    rec.ondataavailable = (e) => { if (e.data.size > 0) webChunkDataRef.current.push(e.data); };
+    rec.start(1000);
+    webRecorderRef.current = rec;
 
     webChunkTimerRef.current = setTimeout(async () => {
       if (isStoppingRef.current) return;
@@ -75,42 +108,30 @@ export function useAudioRecording() {
   // ── Mobile helpers ────────────────────────────────────────────────────────────
 
   const stopCurrentRecordingChunk = useCallback(async (): Promise<string | null> => {
-    if (!recordingRef.current) return null;
+    if (!isNativeRecordingRef.current) return null;
+    isNativeRecordingRef.current = false;
+    lastRecorderUriRef.current = null; // clear so we detect the new URI
     try {
-      await recordingRef.current.stopAndUnloadAsync();
-      const uri = recordingRef.current.getURI();
-      recordingRef.current = null;
-      return uri ?? null;
-    } catch { return null; }
-  }, []);
+      await recorder.stop();
+      // recorder.uri may be set asynchronously via React state after stop() resolves.
+      // Poll for up to 1.5 s to give it time to propagate.
+      for (let i = 0; i < 15; i++) {
+        const uri = lastRecorderUriRef.current ?? recorder.uri ?? null;
+        if (uri) return uri;
+        await new Promise<void>((r) => setTimeout(r, 100));
+      }
+      return lastRecorderUriRef.current ?? recorder.uri ?? null;
+    } catch (e) {
+      console.error('[Audio] stop error:', e);
+      return null;
+    }
+  }, [recorder]);
 
   const startNewChunk = useCallback(async () => {
     if (isStoppingRef.current) return;
-    const recording = new Audio.Recording();
-    await recording.prepareToRecordAsync({
-      android: {
-        extension: '.m4a',
-        outputFormat: Audio.AndroidOutputFormat.MPEG_4,
-        audioEncoder: Audio.AndroidAudioEncoder.AAC,
-        sampleRate: 16000,
-        numberOfChannels: 1,
-        bitRate: 64000,
-      },
-      ios: {
-        extension: '.m4a',
-        outputFormat: Audio.IOSOutputFormat.MPEG4AAC,
-        audioQuality: Audio.IOSAudioQuality.MEDIUM,
-        sampleRate: 16000,
-        numberOfChannels: 1,
-        bitRate: 64000,
-        linearPCMBitDepth: 16,
-        linearPCMIsBigEndian: false,
-        linearPCMIsFloat: false,
-      },
-      web: {},
-    });
-    await recording.startAsync();
-    recordingRef.current = recording;
+    await recorder.prepareToRecordAsync();
+    recorder.record();
+    isNativeRecordingRef.current = true;
 
     chunkTimerRef.current = setTimeout(async () => {
       if (isStoppingRef.current) return;
@@ -121,14 +142,14 @@ export function useAudioRecording() {
       }
       await startNewChunk();
     }, CHUNK_DURATION_MS);
-  }, [stopCurrentRecordingChunk, addAudioChunk]);
+  }, [recorder, stopCurrentRecordingChunk, addAudioChunk]);
 
   // ── Public API ────────────────────────────────────────────────────────────────
 
   const startRecording = useCallback(async (): Promise<boolean> => {
     try {
-      isStoppingRef.current = false;
-      chunkIndexRef.current = 0;
+      isStoppingRef.current    = false;
+      chunkIndexRef.current    = 0;
       elapsedSecondsRef.current = 0;
 
       if (Platform.OS === 'web') {
@@ -136,9 +157,9 @@ export function useAudioRecording() {
         webStreamRef.current = stream as MediaStream;
         await startWebChunk();
       } else {
-        const { status } = await Audio.requestPermissionsAsync();
-        if (status !== 'granted') return false;
-        await Audio.setAudioModeAsync({ allowsRecordingIOS: true, playsInSilentModeIOS: true });
+        const { granted } = await requestRecordingPermissionsAsync();
+        if (!granted) return false;
+        await setAudioModeAsync({ allowsRecording: true, playsInSilentMode: true });
         await startNewChunk();
       }
 
@@ -171,7 +192,7 @@ export function useAudioRecording() {
         const lastChunk: AudioChunk = { index: chunkIndexRef.current, localPath: uri, storagePath: null, processed: false };
         addAudioChunk(lastChunk);
       }
-      try { await Audio.setAudioModeAsync({ allowsRecordingIOS: false }); } catch { /* ignore */ }
+      try { await setAudioModeAsync({ allowsRecording: false }); } catch { /* ignore */ }
     }
 
     setIsRecording(false);
@@ -190,9 +211,9 @@ export function useAudioRecording() {
 
   useEffect(() => {
     return () => {
-      if (chunkTimerRef.current) clearTimeout(chunkTimerRef.current);
+      if (chunkTimerRef.current)    clearTimeout(chunkTimerRef.current);
       if (webChunkTimerRef.current) clearTimeout(webChunkTimerRef.current);
-      if (elapsedTimerRef.current) clearInterval(elapsedTimerRef.current);
+      if (elapsedTimerRef.current)  clearInterval(elapsedTimerRef.current);
     };
   }, []);
 

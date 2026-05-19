@@ -92,15 +92,10 @@ export async function processMeetingViaEdgeFunction(
   onProgress({ stage: 'transcribing', message: 'Analysing your meeting...', progress: 25 });
 
   const { data, error } = await supabase.functions.invoke('process-meeting', {
-    body: {
-      meetingId,
-      chunkStoragePaths,
-      nextSteps,
-    },
+    body: { meetingId, chunkStoragePaths, nextSteps },
   });
 
   if (error) {
-    // Try to get the real error message from the Edge Function response body
     let detail = error.message;
     try {
       const ctx = (error as any).context;
@@ -112,10 +107,41 @@ export async function processMeetingViaEdgeFunction(
     throw new Error(detail);
   }
 
-  if (!data?.success) {
-    throw new Error(data?.error ?? 'Unknown processing error');
+  if (!data?.success) throw new Error(data?.error ?? 'Unknown processing error');
+  onProgress({ stage: 'done', message: 'Meeting minutes ready!', progress: 100 });
+}
+
+// Sends the STT-generated transcript text directly — no audio upload required.
+export async function processMeetingWithTranscript(
+  meetingId: string,
+  transcript: string,
+  nextSteps: string,
+  onProgress: (status: ProcessingStatus) => void
+): Promise<void> {
+  onProgress({ stage: 'transcribing', message: 'Sending transcript for analysis...', progress: 20 });
+
+  const { data, error } = await supabase.functions.invoke('process-meeting', {
+    body: {
+      meetingId,
+      transcript,         // text from expo-speech-recognition
+      chunkStoragePaths: [], // empty — no audio files
+      nextSteps,
+    },
+  });
+
+  if (error) {
+    let detail = error.message;
+    try {
+      const ctx = (error as any).context;
+      if (ctx?.json) {
+        const body = await ctx.json();
+        if (body?.error) detail = body.error;
+      }
+    } catch { /* ignore */ }
+    throw new Error(detail);
   }
 
+  if (!data?.success) throw new Error(data?.error ?? 'Unknown processing error');
   onProgress({ stage: 'done', message: 'Meeting minutes ready!', progress: 100 });
 }
 

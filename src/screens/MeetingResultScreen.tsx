@@ -6,14 +6,13 @@ import {
   ScrollView,
   TouchableOpacity,
   Platform,
+  Linking,
 } from 'react-native';
 
 const IS_WEB = Platform.OS === 'web';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useNavigation, useRoute, RouteProp } from '@react-navigation/native';
 import { NativeStackNavigationProp } from '@react-navigation/native-stack';
-import * as Sharing from 'expo-sharing';
-import * as FileSystem from 'expo-file-system';
 import { RootStackParamList, MeetingRecord } from '../types';
 import { COLORS, FONTS, SPACING, RADIUS, SHADOWS } from '../constants/theme';
 import { getMeetingById } from '../services/meetingService';
@@ -45,7 +44,6 @@ export function MeetingResultScreen() {
   const route = useRoute<Route>();
   const { meetingId } = route.params;
   const [meeting, setMeeting] = useState<MeetingRecord | null>(null);
-  const [downloading, setDownloading] = useState(false);
   const [shareError, setShareError] = useState('');
 
   useEffect(() => {
@@ -62,30 +60,18 @@ export function MeetingResultScreen() {
     }
 
     try {
-      setDownloading(true);
-      const localUri = FileSystem.cacheDirectory + `meeting_${meetingId}.pdf`;
-      const dl = await FileSystem.downloadAsync(meeting.pdf_url, localUri);
-      if (dl.status !== 200) throw new Error('Download failed');
-      const canShare = await Sharing.isAvailableAsync();
-      if (canShare) {
-        await Sharing.shareAsync(dl.uri, {
-          mimeType: 'application/pdf',
-          dialogTitle: 'Share Meeting Minutes',
-        });
-      } else {
-        setShareError('Sharing is not available on this device.');
-      }
+      await Linking.openURL(meeting.pdf_url);
     } catch {
-      setShareError('Failed to download the PDF. Please try again.');
-    } finally {
-      setDownloading(false);
+      setShareError('Could not open the PDF. Please try again.');
     }
   };
 
   const formatDuration = (s: number) => {
+    if (!s || s <= 0) return '< 1 min';
     const h = Math.floor(s / 3600);
     const m = Math.floor((s % 3600) / 60);
     if (h > 0) return `${h}h ${m}m`;
+    if (m === 0) return '< 1 min';
     return `${m} min`;
   };
 
@@ -104,15 +90,11 @@ export function MeetingResultScreen() {
       {/* Header */}
       <View style={styles.header}>
         <Text style={styles.headerTitle}>Meeting Minutes</Text>
-        <TouchableOpacity
-          style={[styles.shareBtn, downloading && styles.shareBtnDisabled]}
-          onPress={handleShare}
-          disabled={downloading}
-        >
-          <Text style={styles.shareBtnText}>
-            {downloading ? 'Downloading...' : '📤 Share PDF'}
-          </Text>
-        </TouchableOpacity>
+        {meeting.pdf_url ? (
+          <TouchableOpacity style={styles.shareBtn} onPress={handleShare}>
+            <Text style={styles.shareBtnText}>📤 View PDF</Text>
+          </TouchableOpacity>
+        ) : null}
       </View>
 
       <ScrollView
@@ -126,16 +108,28 @@ export function MeetingResultScreen() {
           </View>
         )}
 
-        {/* Success Banner */}
-        <View style={styles.successBanner}>
-          <Text style={styles.successIcon}>✅</Text>
-          <View style={{ flex: 1 }}>
-            <Text style={styles.successTitle}>Meeting Minutes Ready</Text>
-            <Text style={styles.successSub}>
-              Your PDF has been saved and is ready to share.
-            </Text>
+        {/* Status Banner */}
+        {meeting.pdf_url ? (
+          <View style={styles.successBanner}>
+            <Text style={styles.successIcon}>✅</Text>
+            <View style={{ flex: 1 }}>
+              <Text style={styles.successTitle}>Meeting Minutes Ready</Text>
+              <Text style={styles.successSub}>
+                {meeting.summary
+                  ? 'Your PDF has been saved and is ready to share.'
+                  : 'Your meeting details have been saved. No audio was recorded.'}
+              </Text>
+            </View>
           </View>
-        </View>
+        ) : (
+          <View style={styles.infoBanner}>
+            <Text style={styles.infoIcon}>ℹ️</Text>
+            <View style={{ flex: 1 }}>
+              <Text style={styles.infoTitle}>Meeting Saved</Text>
+              <Text style={styles.infoSub}>No audio was recorded for this meeting.</Text>
+            </View>
+          </View>
+        )}
 
         {/* Meeting Details */}
         <Section title="Meeting Details">
@@ -162,7 +156,7 @@ export function MeetingResultScreen() {
           {meeting.address && (
             <View style={styles.locationRow}>
               <Text style={styles.detailLabel}>📍 Location</Text>
-              <Text style={styles.detailValue}>{meeting.address}</Text>
+              <Text style={[styles.detailValue, styles.locationValue]}>{meeting.address}</Text>
             </View>
           )}
         </Section>
@@ -290,6 +284,20 @@ const styles = StyleSheet.create({
   successIcon: { fontSize: 28 },
   successTitle: { fontSize: FONTS.sizes.base, fontWeight: '700', color: '#166534' },
   successSub: { fontSize: FONTS.sizes.sm, color: '#166534', opacity: 0.8 },
+  infoBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#EEF4FF',
+    borderRadius: RADIUS.lg,
+    padding: SPACING.md,
+    marginBottom: SPACING.md,
+    borderWidth: 1,
+    borderColor: '#C7D9FF',
+    gap: SPACING.sm,
+  },
+  infoIcon: { fontSize: 24 },
+  infoTitle: { fontSize: FONTS.sizes.base, fontWeight: '700', color: COLORS.primary },
+  infoSub: { fontSize: FONTS.sizes.sm, color: COLORS.primary, opacity: 0.8 },
   section: {
     backgroundColor: COLORS.surface,
     borderRadius: RADIUS.lg,
@@ -330,7 +338,8 @@ const styles = StyleSheet.create({
     marginBottom: 2,
   },
   detailValue: { fontSize: FONTS.sizes.base, color: COLORS.text, fontWeight: '600' },
-  locationRow: { flexDirection: 'row', justifyContent: 'space-between', gap: SPACING.sm },
+  locationRow: { marginTop: SPACING.sm },
+  locationValue: { fontWeight: '500', marginTop: 2 },
   summaryText: { fontSize: FONTS.sizes.base, color: COLORS.text, lineHeight: 24 },
   bulletRow: { flexDirection: 'row', marginBottom: SPACING.xs, gap: SPACING.xs },
   bulletDot: { fontSize: FONTS.sizes.base, color: COLORS.primary, marginTop: 1 },
